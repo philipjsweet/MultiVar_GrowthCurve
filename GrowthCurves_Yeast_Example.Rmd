@@ -1,0 +1,190 @@
+---
+title: "GrowthCurve"
+author: "Philip Sweet"
+date: "2023-08-30"
+output: html_document
+---
+
+Goal: Determine the impact of X-ray exposure on growth characteristics of Yarrowia lipolytica WT and yarrowia lipolytica Bx.
+
+Data: Input data is OD600 measurements collected every 20min. 
+
+Method: Cells were grwon for 48, exposed to IR using a Faxitron MultiRad 225. High energy particles were selected for with a 0.5mm Al filter. Doses included 0, 2, 50 and 200Gy. The production strain carries a genetically inserted BX operon. Cells were diluted to an OD600 of 0.1 and grown in a BioScreenC culture Honeycomb2 plate at 30C. total volume: 200 uL.
+
+Output: Graphs and summary statistics. 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## Libraries
+library(tidyverse)
+library(growthrates)
+library(cowplot)
+
+## Data 
+
+key_name <- c("Data_Key.csv")
+
+data_name <-c("OD_data.csv")
+
+time_interval <- 20
+
+```
+
+```{r read in data, include=FALSE}
+
+read.csv(key_name) -> key
+
+read.csv(data_name ) -> data
+
+head(key)
+
+head(data)
+
+```
+
+## Data Quality
+
+```{r tidy data}
+
+data %>%
+  rownames_to_column(var = "Time2") %>%
+  mutate(Time = (((as.numeric(Time2) -1) * time_interval) + 0.05)) %>%
+  column_to_rownames(var = "Time2") %>%
+  pivot_longer(-Time, values_to = "OD600", names_to = "Well_ID") %>%
+   mutate(Well_ID = as.numeric(str_remove(Well_ID, "Well." ))) %>%
+  left_join(key, by = c("Well_ID" = "Well_ID")) -> tidy_data
+
+head(tidy_data)
+
+ggplot(tidy_data, aes(x = Time, y = OD600, color = as.factor(BioRep))) +
+  geom_point() +
+  facet_wrap(~Strain + Dose) +
+  theme_minimal()
+
+```
+No growth in blank! Growth of the BX strains is highly divergent within biological replicates.
+
+```{r plot2}
+
+tidy_data %>%
+  filter(Strain != "Blank") %>%
+  filter(Time < 750 ) %>%
+  ggplot(aes(x = Time, y = OD600, color = Dose)) +
+    geom_point() +
+    scale_color_gradient(low = "blue", high = "red") + 
+    facet_wrap(~Strain) +
+    theme_minimal()
+
+```
+
+Spread in the growth curves, but seems to be more about BioRep than Dose. Bx producing 200Gy do have a lot of growth delays. 
+
+```{r growth curver}
+
+all_linear_data <- all_easylinear(OD600 ~  Time | Well_ID + Strain + Dose + BioRep, data = tidy_data)
+
+growthrates <- as.data.frame(coef(all_linear_data ))
+
+growthrates %>%
+  rownames_to_column(var = "SampleID") %>%
+  separate(SampleID, sep = ":", into = c("Well","Strain","Dose","BioRep")) %>%
+  mutate(Dose = as.numeric(Dose)) %>%
+  mutate(max_double = (log(2)/mumax)) -> growth_data
+
+growth_data %>%
+  group_by(Strain, Dose) %>%
+  summarise(mean_minDoubleTime = mean(max_double),  
+            mean_LagTime = mean(lag))
+
+
+```
+
+
+```{r plot growth curver}
+
+growth_data %>%
+  ggplot(aes(x = as.factor(Dose), y = max_double, color = Dose)) +
+  geom_boxplot() + 
+  scale_color_gradient(low = "blue", high = "red") + 
+  facet_wrap(~Strain)  +
+  theme_cowplot()+
+  ylab("Min. Doubling Time (min)") +
+  xlab("Dose (Gy)") +
+  ggtitle("Min. Doubling Time by Dose") 
+
+growth_data %>%
+  ggplot(aes(x = as.factor(Dose), y = max_double, color = Dose)) +
+  geom_boxplot() + 
+  scale_color_gradient(low = "blue", high = "red") + 
+  facet_wrap(~Strain)  +
+  theme_cowplot()+
+  ylab("Min. Doubling Time (min)") +
+  xlab("Dose (Gy)") +
+  ggtitle("Min. Doubling Time by Dose") +
+  ylim(0,250)
+
+growth_data %>%
+  ggplot(aes(x = as.factor(Dose), y = lag, color = Dose)) +
+  geom_boxplot() +
+  scale_color_gradient(low = "blue", high = "red") + 
+  facet_wrap(~Strain) +
+  theme_cowplot() +
+  ylab("Lag Time (min)") +
+  xlab("Dose (Gy)") +
+  ggtitle("Lag Time by Dose")
+
+```
+
+## Results 
+
+Looking at the distributions of the lag times and max rates of doubling,in contrast to the E.coli data, YL production stain is growing much faster than the WT. The unstressed doubling time is around 110min in the production strain compared to 175min in the WT. We do see an increase in the production strain doubling time, as dose increases but spread is wide. The WT doesn't seem to have a dose dependent impact on doubling. No change in lag time after exposure. 
+
+Next, lets look at the ratios compared to 0Gy within strains to correct for the difference due to plasmids and production. 
+
+```{r ratios}
+
+growth_data %>%
+  group_by(Strain) %>%
+  mutate(Ratio_Lag = lag/(mean(lag[Dose == 0]))) %>%
+  mutate(Ratio_Max = max_double/(mean(max_double[Dose == 0]))) -> growth_data
+
+growth_data %>%
+  group_by(Dose,Strain) %>%
+  summarise(
+    lag_sd = sd(Ratio_Lag, na.rm = TRUE),
+    lag_FC = mean(Ratio_Lag),
+    max_sd = sd(Ratio_Max , na.rm = TRUE),
+    max_FC = mean(Ratio_Max),
+  ) -> summary
+
+summary %>%
+  ggplot(aes(x = as.factor(Dose), max_FC, fill = Dose)) +
+  geom_col(position = position_dodge2(preserve = "single")) +
+  geom_errorbar(aes(ymin = max_FC - max_sd , ymax = max_FC + max_sd, width = 0.2)) +
+  scale_fill_gradient(low = "blue", high = "red") + 
+  facet_wrap(~Strain) +
+  theme_cowplot() +
+  labs(fill="Dose (Gy)") +
+  xlab("Dose (Gy)") +
+  ylab("Doubling Time Ratio (Exp/Sham)")
+
+summary %>%
+  ggplot(aes(x = as.factor(Dose), lag_FC, fill = Dose)) +
+  geom_col(position = position_dodge2(preserve = "single")) +
+  geom_errorbar(aes(ymin = lag_FC - lag_sd , ymax = lag_FC + lag_sd, width = 0.2)) +
+  scale_fill_gradient(low = "blue", high = "red") + 
+  facet_wrap(~Strain) +
+  theme_cowplot() +
+  labs(fill="Dose (Gy)") +
+  xlab("Dose (Gy)") +
+  ylab("Lag Time Ratio (Exp/Sham)")
+
+
+
+```
+
+## Summary 
+
+There is no difference in the relative doubling times due to IR, though sham error bars are large complicating statistical testing. The ratio of the lag times are more variable and while there does seem to be an upward trend in the WT after IR exposure, the error bars all overlap.  
